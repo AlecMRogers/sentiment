@@ -1,11 +1,21 @@
 import numpy as np
 import pandas as pd
+import os, torch
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 
 def run(data):
     # Load model
-    model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+
+    cache_file = "all-mpnet-base-v2.model"
+    # Load or cache the pre-trained Word2Vec model
+    if os.path.exists(cache_file):
+        print("Loading cached mpnet model...")
+        model = torch.load(cache_file, weights_only=False)
+    else:
+        print("Downloading model...")
+        model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+        torch.save(model, cache_file)
 
     # Convert text to embeddings
     train_embeddings = model.encode(data["train"]["text"], show_progress_bar=True)
