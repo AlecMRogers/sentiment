@@ -4,10 +4,9 @@ import importlib
 import torch
 import os
 
-# Load our data
-cache_file = "rottenTomatoes.data"
 
-# Load or cache the pre-trained Word2Vec model
+# Load and/or cache the dataset
+cache_file = "rottenTomatoes.data"
 if os.path.exists(cache_file):
     print("Loading cached data...")
     data = torch.load(cache_file, weights_only=False)
@@ -17,15 +16,15 @@ else:
     torch.save(data, cache_file)
 
 # Have a look at the data
-print("\nInput: ", data["train"]["text"][0])
-print("\nOutput: ", data["train"]["label"][0])
+print("\nInput: ", data["train"]["text"][10])
+print("\nOutput: ", data["train"]["label"][10])
 
-
-# Next we iterate over all of the models that we are comparing to categorize this dataset.
-#models = ["bert", "embedding", "logisticEmbedding", "zeroShot", "flan", "chatGPT"]
-models = ["embedding", "bert", "flan"]
+# Iterate over the models that we are comparing
+#models = ["embedding", "logisticEmbedding", "zeroShot", "chatGPT"]
+models = [ "bert", "flan", "transformer" ]
 
 for m in models:
+    print("Running model: {}".format(m))
     module = importlib.import_module(m)
     y_actual = data["test"]["label"]
     y_pred   = eval('module.run(data)')
