@@ -1,25 +1,133 @@
 import math
 import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_dataset
 from gensim.models import Word2Vec
 from gensim.models import KeyedVectors
+from gensim.test.utils import common_texts
 import numpy as np
 from sklearn.metrics import classification_report
 
 
-class Word2VecEmbedding:
-    def __init__(self, sentences, embed_dim=100, model_path="word2vec.model"):
+class PositionalEncoding(nn.Module):
+    def __init__(self, embed_dim, max_len=10000):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, embed_dim)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.pe = pe.unsqueeze(0)
+        # normalize the positional encodings so that they do not overwhelm the data
+        self.pe = self.pe / torch.norm(self.pe, dim=-1, keepdim=True)
+
+    def forward(self, x):
+        return x + self.pe[:, :x.size(1), :]
+
+
+class SingleHeadAttention(nn.Module):
+    def __init__(self, embed_dim):
+        super(SingleHeadAttention, self).__init__()
+
+        self.embed_dim = embed_dim
+        self.linear_q = nn.Linear(embed_dim, embed_dim)
+        self.linear_k = nn.Linear(embed_dim, embed_dim)
+        self.linear_v = nn.Linear(embed_dim, embed_dim)
+        #self.final_linear = nn.Linear(embed_dim, embed_dim)
+        self.dropout = nn.Dropout(p=0.1)
+
+    def scaled_dot_product_attention(self, query, key, value, mask=None):
+        # Scale dot product
+        scores = torch.matmul(query, key.transpose(-2, -1)) / (self.embed_dim ** 0.5)
+
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+
+        attn = F.softmax(scores, dim=-1)
+        attn = self.dropout(attn)
+        output = torch.matmul(attn, value)
+        return output, attn
+
+    def forward(self, query, key, value, mask=None):
+        batch_size = query.size(0)
+
+        query = self.linear_q(query).view(batch_size, -1, 1, self.embed_dim).transpose(1, 2)
+        key = self.linear_k(key).view(batch_size, -1, 1, self.embed_dim).transpose(1, 2)
+        value = self.linear_v(value).view(batch_size, -1, 1, self.embed_dim).transpose(1, 2)
+
+        attn_output, attn = self.scaled_dot_product_attention(query, key, value, mask)
+
+        output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.embed_dim)
+        #output = self.final_linear(attn_output)
+
+        return output, attn
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads):
+        super(MultiHeadAttention, self).__init__()
+        assert embed_dim % num_heads == 0, "Embedding dimension must be divisible by number of heads"
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        self.linear_q = nn.Linear(embed_dim, embed_dim)
+        self.linear_k = nn.Linear(embed_dim, embed_dim)
+        self.linear_v = nn.Linear(embed_dim, embed_dim)
+
+        self.final_linear = nn.Linear(embed_dim, embed_dim)
+        self.dropout = nn.Dropout(p=0.1)
+
+    def scaled_dot_product_attention(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        # Scale dot product
+        scores = torch.matmul(query, key.transpose(-2, -1)) / (self.head_dim ** 0.5)
+
+        if attn_mask is not None:
+            scores = scores.masked_fill(attn_mask == 0, float('-inf'))
+
+        if key_padding_mask is not None:
+            # Assuming key_padding_mask is a ByteTensor with shape [batch_size, seq_len] where padding elements are True
+            scores = scores.masked_fill(key_padding_mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+
+        attn = F.softmax(scores, dim=-1)
+        attn = self.dropout(attn)
+        output = torch.matmul(attn, value)
+        return output, attn
+
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        batch_size = query.size(0)
+
+        query = self.linear_q(query).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        key = self.linear_k(key).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        value = self.linear_v(value).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+
+        attn_output, attn = self.scaled_dot_product_attention(query, key, value, attn_mask, key_padding_mask)
+
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.embed_dim)
+        output = self.final_linear(attn_output)
+
+        return output, attn
+
+class EmbeddingLayer(nn.Module):
+    def __init__(self, embed_dim=100, sentences=None, model_path="word2vec.model"):
+        super(EmbeddingLayer, self).__init__()
         """
         Initializes Word2Vec embedding model.
         """
-        self.model_path = f"embeddings/{model_path}{embed_dim}"
-        self.embed_dim  = embed_dim
+        self.model_path          = f"embeddings/{model_path}{embed_dim}"
+        self.embed_dim           = embed_dim
+        self.norm                = nn.LayerNorm(embed_dim)
+        self.positional_encoding = PositionalEncoding(embed_dim)
+        self.attention           = SingleHeadAttention(embed_dim) # MultiHeadAttention(embed_dim, num_heads=1)
+        self.embedding           = None
+
+        # Size of the embedding is Batch Size (2) X Sequence Length (3) X Embedding Dimension (100)
+        self.max_len             = None #len(sentences)
 
         try:
+            print("Loading pre-trained Word2Vec model...")
             self.model = Word2Vec.load(self.model_path)
             print("Loaded pre-trained Word2Vec model.")
         except:
@@ -47,18 +155,15 @@ class Word2VecEmbedding:
                 if (self.embed_dim != self.model.vector_size):
                     print("Error loading word2Vec model.")
             else:
-                self.model = Word2Vec(sentences, vector_size=embed_dim, window=5, min_count=1, workers=4)
+                self.model = Word2Vec(sentences=common_texts+sentences, vector_size=embed_dim, window=5, min_count=1, workers=4)
             self.model.save(self.model_path)
             print("Word2Vec model trained and saved.")
 
-
-
-    def get_embedding(self, tokenized_sentences, max_len=None):
+    def get_embedding(self, tokenized_sentences):
         """
         Converts tokenized sentences into Word2Vec embeddings.
         """
-        if max_len is None:
-            max_len = max(len(sentence) for sentence in tokenized_sentences)
+        self.max_len = max(len(sentence) for sentence in tokenized_sentences)
 
         embeddings = []
         for sentence in tokenized_sentences:
@@ -69,86 +174,37 @@ class Word2VecEmbedding:
                 else:
                     sentence_embeddings.append(np.random.randn(self.embed_dim))
 
-            while len(sentence_embeddings) < max_len:
+            while len(sentence_embeddings) < self.max_len:
                 sentence_embeddings.append(np.zeros(self.embed_dim))
 
             embeddings.append(sentence_embeddings)
 
-        return torch.from_numpy(np.array(embeddings, dtype=np.float32))
+        e =  torch.from_numpy(np.array(embeddings, dtype=np.float32))
+        return e.permute(1, 0, 2)  # Shape: (seq_length, batch_size, embedding_dim)
         #return torch.tensor(embeddings, dtype=torch.float32)
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, embed_dim, max_len=10000):
-        super(PositionalEncoding, self).__init__()
-        pe = torch.zeros(max_len, embed_dim)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.pe = pe.unsqueeze(0)
-        # normalize the positional encodings so that they do not overwhelm the data
-        self.pe = self.pe / torch.norm(self.pe, dim=-1, keepdim=True)
+    def create_mask(self, tokenized_sentences):
+        mask = torch.zeros(len(tokenized_sentences), self.max_len, dtype=torch.bool)
+        for i, sentence in enumerate(tokenized_sentences):
+            mask[i, len(sentence):] = True
+        return mask
 
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1), :]
+    def forward(self, x, mask=None):
+        # get embeddings from tokenized sentence for new x
+        if x is not None:
+            #print("Generating embedding ...")
+            self.embedding = self.get_embedding(x)
+            #print("Generating positional encoding ...")
+            self.embedding = self.positional_encoding(self.embedding)
+        x = self.embedding
+        attn_output, _ = self.attention(x,x,x, mask)
+        x = self.norm(x + attn_output)
+        return x
 
-class SingleHeadSelfAttention(nn.Module):
-    def __init__(self, embed_dim):
-        super(SingleHeadSelfAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.scale = torch.sqrt(torch.tensor(embed_dim, dtype=torch.float32))
-
-        self.W_Q = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.W_K = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.W_V = nn.Linear(embed_dim, embed_dim, bias=False)
-
-    def forward(self, query, key, value, mask=None):
-        Q = self.W_Q(query)
-        K = self.W_K(query)
-        V = self.W_V(query)
-
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, V)
-
-        return attn_output, 0
-
-class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads=6):
-        super(MultiHeadSelfAttention, self).__init__()
-        assert embed_dim % num_heads == 0
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-
-        self.W_Q = nn.Linear(embed_dim, embed_dim)
-        self.W_K = nn.Linear(embed_dim, embed_dim)
-        self.W_V = nn.Linear(embed_dim, embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-
-    def forward(self, query, key, value, mask=None):
-        batch_size, seq_len, _ = query.shape
-        Q = self.W_Q(query).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        K = self.W_K(key).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        V = self.W_V(value).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, V)
-
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        return self.out_proj(attn_output)
-
-class TransformerEncoderLayer(nn.Module):
+class TransformerLayer(nn.Module):
     def __init__(self, embed_dim, ff_dim=256):
-        super(TransformerEncoderLayer, self).__init__()
-        self.attention = nn.MultiheadAttention(embed_dim, num_heads=1)
-        #self.attention = SingleHeadSelfAttention(embed_dim)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        super(TransformerLayer, self).__init__()
+        self.norm = nn.LayerNorm(embed_dim)
 
         self.feedforward = nn.Sequential(
             nn.Linear(embed_dim, ff_dim),
@@ -157,113 +213,98 @@ class TransformerEncoderLayer(nn.Module):
         )
 
     def forward(self, x, mask=None):
-        attn_output, _ = self.attention(x,x,x, mask)
-        x = self.norm1(x + attn_output)
         ff_output = self.feedforward(x)
-        x = self.norm2(x + ff_output)
+        x = self.norm(x + ff_output)
         return x
 
 class TransformerModel(nn.Module):
-    def __init__(self, embed_dim=128, num_layers=1, ff_dim=256, num_classes=2):
+    def __init__(self, embed_dim=128, sentences=None, tf_dim=256, num_classes=2):
         super(TransformerModel, self).__init__()
         self.embed_dim = embed_dim
-        self.positional_encoding = PositionalEncoding(embed_dim)
 
-        self.encoder_layers = nn.ModuleList(
-            [TransformerEncoderLayer(embed_dim, ff_dim) for _ in range(num_layers)]
-        )
+        self.embeddingLayer   = EmbeddingLayer(embed_dim, sentences=sentences)
+        self.transformerLayer = TransformerLayer(embed_dim, tf_dim)
+        self.classifier       = nn.Linear(embed_dim, num_classes)  # Classification head
 
-        self.classifier = nn.Linear(embed_dim, num_classes)  # Classification head
-
-    def forward(self, x, mask=None):
-        x = self.positional_encoding(x)
-        for layer in self.encoder_layers:
-            x = layer(x, mask)
+    def forward(self, input, mask=None):
+        x = self.embeddingLayer(input, mask)
+        x = self.transformerLayer(x, mask)
 
         x = x.mean(dim=0)  # Global average pooling over sequence
         x = self.classifier(x)  # Predict labels
         x = torch.sigmoid(x) # For BCE loss
         return torch.squeeze(x)
 
-def train_model(model, train_embeddings, train_labels, num_epochs=5, lr=0.001, mask=None):
-    """
-    Trains the Transformer model using labeled training data.
-    """
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    #loss_fn = nn.CrossEntropyLoss()
-    #loss_fn = nn.BCELoss()  # Binary Cross Entropy Loss if
-    loss_fn = nn.MSELoss()
+    def runTrain(model, input, output, num_epochs=5, lr=0.001, mask=None):
+        """
+        Trains the Transformer model using labeled training data.
+        """
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        #loss_fn = nn.CrossEntropyLoss()
+        #loss_fn = nn.BCELoss()  # Binary Cross Entropy Loss if
+        loss_fn = nn.MSELoss()
 
-    model.train()
-    for epoch in range(num_epochs):
-        optimizer.zero_grad()
-        output = model(train_embeddings, mask)
-        loss = loss_fn(output, train_labels)
-        loss.backward()
-        optimizer.step()
-        print(f"Train Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}")
-    return output.detach().numpy()
+        model.train()
+        batch_size = 100
+        allOutput = np.zeros_like(output)
+        for epoch in range(num_epochs):
+            for i in range(0, len(input), batch_size):
+                input_batch = input[i:i + batch_size]
+                output_batch = output[i:i + batch_size]
+                optimizer.zero_grad()
+                eOutput = model(input_batch, mask)
+                loss = loss_fn(eOutput, output_batch)
+                loss.backward()
+                optimizer.step()
+                print(f"Train Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}")
+                # set input to None to used cached values
+                #input = None
+                allOutput[i:i + batch_size] = eOutput.detach().numpy()
+        return #np.round(allOutput)
 
-def test_model(model, test_embeddings, test_labels):
-    loss_fn = nn.MSELoss()
-    model.eval()
-    with torch.no_grad():
-        output = model(test_embeddings, mask=None)
-        loss = loss_fn(output, test_labels)
-        print(f"Test Loss: {loss.item():.4f}")
-        #test_probabilities = torch.softmax(test_logits, dim=1) # Convert logits to label predictions
-        #output = torch.argmax(test_probabilities, dim=1)
-    return output.numpy()
+    def runTest(model, input, output, mask=None):
+        loss_fn = nn.MSELoss()
+        model.eval()
+        batch_size = 100
+        allOutput = np.zeros_like(output)
+        with torch.no_grad():
+            for i in range(0, len(input), batch_size):
+                input_batch = input[i:i + batch_size]
+                output_batch = output[i:i + batch_size]
+                eOutput = model(input_batch, mask)
+                loss = loss_fn(eOutput, output_batch)
+                print(f"Test Loss: {loss.item():.4f}")
+                #test_probabilities = torch.softmax(test_logits, dim=1) # Convert logits to label predictions
+                #output = torch.argmax(test_probabilities, dim=1)
+                #input = None
+                allOutput[i:i + batch_size] = eOutput.detach().numpy()
+        return np.round(allOutput)
 
-def create_mask(tokenized_sentences, max_len):
-    mask = torch.zeros(len(tokenized_sentences), max_len, dtype=torch.bool)
-    for i, sentence in enumerate(tokenized_sentences):
-        mask[i, len(sentence):] = True
-    return mask
-
-def run(data, embed_dim = 100, num_epochs=100, lr=0.001):
+def run(data, embed_dim = 100, num_epochs=1, lr=0.001):
     """
     Runs the Transformer model.
     """
     train_tokens = data["train"]["text"]
     train_labels = data["train"]["label"]
-    train_labels = torch.tensor(train_labels, dtype=torch.float)  # Ensure labels are integral
+    train_labels = torch.tensor(train_labels, dtype=torch.float)
+
     test_tokens  = data["test"]["text"]
     test_labels  = data["test"]["label"]
-    test_labels  = torch.tensor(test_labels, dtype=torch.float)  # Ensure labels are integral
+    test_labels  = torch.tensor(test_labels, dtype=torch.float)
 
     rand_indx    = torch.randperm(len(train_labels))
     train_tokens = [train_tokens[i] for i in rand_indx]
     train_labels = train_labels[rand_indx]
 
+    model = TransformerModel(embed_dim=embed_dim, sentences=train_tokens + test_tokens,  num_classes=1) # for one-hot encoding, use len(set(train_labels.tolist()))
+    model.runTrain(train_tokens, train_labels, num_epochs=num_epochs, lr=lr, mask=None)
+    output = model.runTest(test_tokens, test_labels)
 
-    w2v = Word2VecEmbedding(sentences=train_tokens + test_tokens, embed_dim=embed_dim)
-
-    max_len = max(max(len(s) for s in train_tokens), max(len(s) for s in test_tokens))
-    train_embeddings = w2v.get_embedding(train_tokens, max_len=max_len)
-    test_embeddings  = w2v.get_embedding(test_tokens, max_len=max_len)
-    # Size of the embedding is Batch Size (2) X Sequence Length (3) X Embedding Dimension (100)
-
-    train_embeddings = train_embeddings.permute(1, 0, 2) # Shape: (seq_length, batch_size, embedding_dim)
-    test_embeddings  = test_embeddings.permute(1, 0, 2) # Shape: (seq_length, batch_size, embedding_dim)
-
-    #train_padding_mask = create_mask(train_tokens, max_len)
-    #test_padding_mask = create_mask(test_tokens, max_len)
-
-    model = TransformerModel(embed_dim=embed_dim, num_classes=1) # for one-hot encoding, use len(set(train_labels.tolist()))
-
-    # Train model on train_embeddings and train_labels
-    train_model(model, train_embeddings, train_labels, num_epochs=num_epochs, lr=lr, mask=None)
-
-    # Use test_embeddings for inference only
-    output = test_model(model, test_embeddings, test_labels)
-    output = np.round(output)
     return output
-
 
 # Example standalone execution
 if __name__ == "__main__":
-    UseFullDataset =True
+    UseFullDataset = True
 
     if UseFullDataset:
         cache_file = "rottenTomatoes.data"
@@ -283,7 +324,7 @@ if __name__ == "__main__":
 
         print("Running model...")
         y_actual = data["test"]["label"]
-        y_pred = run(data)
+        y_pred = run(data, num_epochs=10)
         performance = classification_report(
             y_actual, y_pred,
             target_names=["Negative Review", "Positive Review"]
@@ -296,7 +337,8 @@ if __name__ == "__main__":
                 "label": [0, 1]  # Corresponding labels
             },
             "test": {
-                "text": [["deep", "learning"], ["attention", "mechanism"]]
+                "text": [["deep", "learning"], ["attention", "mechanism"]],
+                "label": [0, 1]  # Corresponding labels
             }
         }
         output = run(sample_data)
