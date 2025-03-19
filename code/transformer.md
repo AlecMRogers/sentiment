@@ -4,10 +4,10 @@
 ```mermaid
 graph TD
     TransformerModel --> EmbeddingLayer
-    EmbeddingLayer   --> MultiHeadAttention
+    EmbeddingLayer   --> Word2VecEmbedding
     EmbeddingLayer   --> PositionalEncoding
     TransformerModel --> TransformerLayer
-    TransformerLayer --> AttentionLayer
+    TransformerLayer --> MultiHeadAttention
     TransformerLayer --> FeedForwardNetowrk
 ```
 
@@ -83,6 +83,7 @@ Training Data       = Rotten Tomatoes dataset
 Target Labels       = {0,1}
 Error               = MSE
 Embedding dimension = 100
+Transformer neurons = 256, 32 
 Number of epochs    = 100
 Learning Rate       = 0.001 
 Batch Size          = 100
@@ -90,6 +91,7 @@ Stopping Criterion  = 0.05 # stop training if the validation performance increas
 ```
 # Results
 
+## 256 hidden layer neurons:
 ```
  Epoch 12 of 100
  Train Loss: 0.2514
@@ -108,11 +110,51 @@ Stopping Criterion  = 0.05 # stop training if the validation performance increas
 
 <img alt="image" src="transformer_loss_orig.png" title="Train, Test, and Validation Losses" width="900" height="400" />
 
+## 32 hidden layer neurons:
+```
+Epoch [14/100]
+Train Loss: 0.2704
+Validation Loss: 0.2237
+Test Loss: 0.2206
+Training stopped due to overfitting.
+```
+
+|                 | precision | recall | f1-score | support |
+|-----------------|-----------|--------|----------|---------|
+|Negative Review  | 0.52      | 0.85   | 0.64     | 533     |
+|Positive Review  | 0.59      | 0.22   | 0.32     | 533     |
+|       accuracy  |           |        | 0.53     | 1066    |
+|      macro avg  | 0.55      | 0.53   | 0.48     | 1066    |
+|   weighted avg  | 0.55      | 0.53   | 0.48     | 1066    |
+
+<img alt="image" src="transformer_loss_32.png" title="Train, Test, and Validation Losses" width="900" height="400" />
+
+## 64 hidden layer neurons, lr=0.0005
+```
+Epoch [99/100]
+Train Loss: 0.1613
+Validation Loss: 0.2205
+Test Loss: 0.1632
+Training stopped due to overfitting.
+```
+
+                 precision    recall  f1-score   support
+
+Negative Review       0.76      0.70      0.73       533
+Positive Review       0.72      0.78      0.75       533
+
+       accuracy                           0.74      1066
+      macro avg       0.74      0.74      0.74      1066
+   weighted avg       0.74      0.74      0.74      1066
+
+<img alt="image" src="transformer_loss_best.png" title="Train, Test, and Validation Losses" width="900" height="400" />
+
 # Discussion
 
 Training a transformer from scratch, as opposed to using a GPT (Generative Pre-trained Transformer), is probably not a great solution to this prediction problem. Transformers generally rely on vast amounts of data, and the rotten tomatoes dataset is not large.
 
-In order to prevent that overfit, the dataset contains a validation set. Using performance on that subset as a stopping criterion helped somewhat, but it also prevents training from happening for very long. My feeling is that a larger and more varied dataset would help greatly, and if I have time, I will try reducing some of the complexity of the network to see if I can prevent overtraining, which might allow the network to train for a longer period of time without over-parameterizing.
+
+In order to prevent that overfit, the dataset contains a validation set. Using performance on that subset as a stopping criterion helped somewhat, but it also prevents training from happening for very long. My feeling is that a larger and more varied dataset would help greatly. I tried reducing the complexity of the network by reducing the number of hidden layer neurons from 256 to 32 to prevent overtraining, although that did not allow the network to train for much longer without triggering the validation stopping criterion.
 
 
 

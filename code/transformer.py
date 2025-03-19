@@ -7,6 +7,7 @@ from datasets import load_dataset
 from gensim.models import Word2Vec
 from gensim.models import KeyedVectors
 from gensim.test.utils import common_texts
+from nltk.tokenize import word_tokenize
 from matplotlib import pyplot as plt
 from sklearn.metrics import classification_report
 
@@ -133,10 +134,10 @@ class EmbeddingLayer(nn.Module):
                 # Step 2: Initialize a new Word2Vec model with the same settings
                 self.model = Word2Vec(vector_size=pretrained_vectors.vector_size, window=5, min_count=1, workers=4)
                 # Step 3: Build the Word2Vec vocabulary using the pre-trained model's vocab
-                self.model.build_vocab_from_freq( {word: 1 for word in pretrained_vectors.index_to_key} )  # Ensures it has all words
+                #self.model.build_vocab_from_freq( {word: 1 for word in pretrained_vectors.index_to_key} )  # Ensures it has all words
                 # Step 4: Assign Pre-trained Vectors to Word2Vec Model
                 self.model.wv = pretrained_vectors  # Replace the randomly initialized vectors
-                self.model.wv.fill_norms()  # Normalize if needed
+                #self.model.wv.fill_norms()  # Normalize if needed
                 if (self.embed_dim != self.model.vector_size):
                     print("Error loading word2Vec model.")
             elif embed_dim == 300:
@@ -151,10 +152,12 @@ class EmbeddingLayer(nn.Module):
                 self.model = Word2Vec(sentences=common_texts+sentences, vector_size=embed_dim, window=5, min_count=1, workers=4)
             self.model.save(self.model_path)
             print("Word2Vec model trained and saved.")
-    def get_embedding(self, tokenized_sentences):
+    def get_embedding(self, sentences):
         """
         Converts tokenized sentences into Word2Vec embeddings.
         """
+        # tokenize the sentences, and compute the maximum number of tokens
+        tokenized_sentences = [word_tokenize(sentence) for sentence in sentences]
         self.max_len = max(len(sentence) for sentence in tokenized_sentences)
 
         embeddings = []
@@ -173,7 +176,6 @@ class EmbeddingLayer(nn.Module):
 
         e =  torch.from_numpy(np.array(embeddings, dtype=np.float32))
         return e.permute(1, 0, 2)  # Shape: (seq_length, batch_size, embedding_dim)
-
     def create_mask(self, tokenized_sentences):
         self.mask = torch.zeros(len(tokenized_sentences), self.max_len, dtype=torch.bool)
         for i, sentence in enumerate(tokenized_sentences):
@@ -207,7 +209,7 @@ class TransformerLayer(nn.Module):
         return x
 
 class TransformerModel(nn.Module):
-    def __init__(self, embed_dim=128, sentences=None, tf_dim=256, num_classes=2):
+    def __init__(self, embed_dim=128, sentences=None, tf_dim=256, num_classes=1):
         super(TransformerModel, self).__init__()
         self.embed_dim        = embed_dim
         self.embeddingLayer   = EmbeddingLayer(embed_dim, sentences=sentences)
@@ -219,6 +221,7 @@ class TransformerModel(nn.Module):
         x = self.transformerLayer(x)
         x = x.mean(dim=0)  # Global average pooling over batch
         x = self.classifier(x)  # Predict labels
+        x = F.sigmoid(x) # make sure output [0-1]
         return torch.squeeze(x)
 
     def runTrain(model, input, output, lr=0.001, batch_size=100):
@@ -239,7 +242,7 @@ class TransformerModel(nn.Module):
             loss.backward()
             optimizer.step()
             allOutput[i:i + batch_size] = eOutput.detach().numpy()
-        return np.round(allOutput), loss.item()
+        return list(np.round(allOutput).astype(int)), loss.item()
 
     def runTest(model, input, output, batch_size=100):
         loss_fn = nn.MSELoss()
@@ -252,7 +255,7 @@ class TransformerModel(nn.Module):
                 eOutput = model(input_batch)
                 loss = loss_fn(eOutput, output_batch)
                 allOutput[i:i + batch_size] = eOutput.detach().numpy()
-        return np.round(allOutput), loss.item()
+        return list(np.round(allOutput).astype(int)), loss.item()
 
     def plot_loss(self, train_losses, val_losses, test_losses):
         """
@@ -273,11 +276,11 @@ class TransformerModel(nn.Module):
         plt.grid(True)
 
         # Save the plot as a high-resolution PNG (300 DPI)
-        plt.savefig("transformer_loss_orig.png", dpi=300, bbox_inches='tight')
+        plt.savefig("transformer_loss.png", dpi=300, bbox_inches='tight')
         plt.show()
 
     @staticmethod
-    def run(data, embed_dim = 100, num_epochs=1, lr=0.001, stopping_criterion=0.05):
+    def run(data, embed_dim = 100, num_epochs=1, lr=0.0005, stopping_criterion=0.1):
         """
         Runs the Transformer model.
         """
@@ -303,7 +306,7 @@ class TransformerModel(nn.Module):
         test_losses       = []
 
         # for one-hot encoding, use len(set(train_labels.tolist()))
-        model = TransformerModel(embed_dim=embed_dim, sentences=train_tokens + test_tokens, num_classes=1)
+        model = TransformerModel(embed_dim=embed_dim, sentences=train_tokens +validation_tokens+ test_tokens, tf_dim=64, num_classes=1)
 
         for epoch in range(num_epochs):
             print(f"Epoch [{epoch + 1}/{num_epochs}]")
@@ -359,20 +362,20 @@ if __name__ == "__main__":
         )
         print(performance)
     else:
-        sample_data = {
+        data = {
             "train": {
-                "text": [["hello", "world"], ["transformers", "are", "powerful"]],
+                "text": ["hello world", "transformers are powerful"], # nPercepts = 3
                 "label": [0, 1]
             },
             "validation": {
-                "text": [["foo", "bar"], ["hello", "world"]],
+                "text": ["foo bar", "hello world"],            # nPercepts = 2
                 "label": [1, 0]
             },
             "test": {
-                "text": [["deep", "learning"], ["attention", "mechanism"]],
+                "text": ["deep learning", "attention mechanism"], # nPercepts = 2
                 "label": [1, 1]
             }
         }
-        output = TransformerModel.run(sample_data)
+        output = TransformerModel.run(data, num_epochs=100)
         print("Test Predictions:", output)
 
