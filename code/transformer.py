@@ -306,7 +306,7 @@ class TransformerModel(nn.Module):
         test_losses       = []
 
         # for one-hot encoding, use len(set(train_labels.tolist()))
-        model = TransformerModel(embed_dim=embed_dim, sentences=train_tokens +validation_tokens+ test_tokens, tf_dim=64, num_classes=1)
+        model = TransformerModel(embed_dim=embed_dim, sentences=train_tokens +validation_tokens+ test_tokens, tf_dim=256, num_classes=1)
 
         for epoch in range(num_epochs):
             print(f"Epoch [{epoch + 1}/{num_epochs}]")
