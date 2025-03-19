@@ -42,8 +42,9 @@ The self-attention mechanism used here is called MultiHeadSelfAttention. multipl
 2. Queries Retrieve from Memory
 3. Values are the actual memories
 
-#### $$ \text{Attention} = \text{softmax} \left(\frac{Q K^T}{\sqrt{d_h}}\right) V = AV$$
-#### $$ Q=W^Qx, K=W^Kx, V=W^Vx $$
+$$ \text{Attention} = \text{softmax} \left(\frac{Q K^T}{\sqrt{d_h}}\right) V = AV $$
+$$ Q=W^Qx, K=W^Kx, V=W^Vx $$
+
 Where:
 * A is the transition probability matrix, governing how information flows between tokens.
 * QK^T captures pairwise attention relationships in the input (or context window).

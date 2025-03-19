@@ -20,8 +20,8 @@ print("\nInput: ", data["train"]["text"][10])
 print("\nOutput: ", data["train"]["label"][10])
 
 # Iterate over the models that we are comparing
-#models = ["embedding", "logisticEmbedding", "zeroShot", "chatGPT"]
-models = [ "bert", "flan", "transformer" ]
+#models = ["llama", "logisticEmbedding", "zeroShot", "chatGPT"]
+models = [ "embedding", "bert", "flan", "transformer" ]
 
 for m in models:
     print("Running model: {}".format(m))
