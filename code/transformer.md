@@ -133,7 +133,7 @@ Positive Review       0.75      0.74      0.75       533
       macro avg       0.75      0.75      0.75      1066
    weighted avg       0.75      0.75      0.75      1066
 ```
-
+<!---
 |                 | precision | recall | f1-score | support |
 |-----------------|-----------|--------|----------|---------|
 |Negative Review  | 0.54      | 0.53   | 0.53     | 533     |
@@ -141,6 +141,7 @@ Positive Review       0.75      0.74      0.75       533
 |       accuracy  |           |        | 0.54     | 1066    |
 |      macro avg  | 0.54      | 0.54   | 0.54     | 1066    |
 |   weighted avg  | 0.54      | 0.54   | 0.54     | 1066    |
+-->
 
 <img alt="image" src="transformer_loss_256.png" title="Train, Test, and Validation Losses" width="900" height="400" />
 
