@@ -1,4 +1,3 @@
-
 from datasets import load_dataset
 from sklearn.metrics import classification_report
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
@@ -7,16 +6,15 @@ import os
 from tqdm import tqdm
 from transformers.pipelines.pt_utils import KeyDataset
 import torch
+from pathlib import Path
 
-
-# Custom dataset for Rotten Tomatoes data
+# Custom dataset using pre-tokenized inputs
 class RottenDataset(torch.utils.data.Dataset):
-    def __init__(self, texts, labels, tokenizer, max_length=512):
-        self.encodings = tokenizer(texts, truncation=True, padding=True, max_length=max_length)
+    def __init__(self, encodings, labels):
+        self.encodings = encodings
         self.labels = labels
 
     def __getitem__(self, idx):
-        # Convert all encodings to torch tensors and add the label
         item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
         item['labels'] = torch.tensor(self.labels[idx])
         return item
@@ -26,21 +24,15 @@ class RottenDataset(torch.utils.data.Dataset):
 
 
 # Training function using PyTorch
-def train_model(model, tokenizer, train_data, device, epochs=3, batch_size=1, learning_rate=2e-5):
+def train_model(model, train_dataset, device, epochs=3, batch_size=1, learning_rate=2e-5):
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-    train_texts = train_data["text"]
-    train_labels = train_data["label"]
-
-    train_dataset = RottenDataset(train_texts, train_labels, tokenizer)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     for epoch in range(epochs):
         print(f"Epoch {epoch + 1}/{epochs}")
         total_loss = 0
         for batch in tqdm(train_loader, total=len(train_loader)):
-            # Move the batch to the device
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss
@@ -53,35 +45,29 @@ def train_model(model, tokenizer, train_data, device, epochs=3, batch_size=1, le
     return model
 
 
-# Inference function using Hugging Face's pipeline
-def run_inference(data, model, tokenizer):
-    # Create a pipeline for text classification using the fine-tuned model
-    pipe = pipeline(
-        task='text-classification',
-        model=model,
-        tokenizer=tokenizer,
-        top_k=1,
-        device_map="auto"
-    )
-    # Define mapping from label string to numeric label (adjust if necessary)
-    label2id = {
-        0: "LABEL_0",
-        1: "LABEL_1"
-    }
-    y_pred = []
-    for output in tqdm(pipe(KeyDataset(data["test"], "text")), total=len(data["test"])):
-        label_id = output[0]["label"]
-        # Find the numeric label corresponding to the label string
-        label = [k for k, v in label2id.items() if v == label_id][0]
-        y_pred.append(label)
-    return y_pred
+# Inference function using pre-tokenized input
+def run_inference(test_encodings, model, device):
+    model.eval()
+    predictions = []
+    test_dataset = RottenDataset(test_encodings, [0] * len(test_encodings["input_ids"]))  # Dummy labels
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=16)
+
+    with torch.no_grad():
+        for batch in tqdm(test_loader, total=len(test_loader)):
+            batch = {k: v.to(device) for k, v in batch.items() if k != "labels"}
+            outputs = model(**batch)
+            logits = outputs.logits
+            preds = torch.argmax(logits, dim=1)
+            predictions.extend(preds.cpu().numpy())
+
+    return predictions
 
 
-# Standalone execution entry point
 if __name__ == "__main__":
     cache_file = "rottenTomatoes.data"
+    access_token = Path('token.txt').read_text()
 
-    # Load or cache the dataset
+    # Load or cache dataset
     if os.path.exists(cache_file):
         print("Loading cached data...")
         data = torch.load(cache_file, map_location="cpu", weights_only=False)
@@ -90,39 +76,45 @@ if __name__ == "__main__":
         data = load_dataset("rotten_tomatoes")
         torch.save(data, cache_file)
 
-    # Display sample data from the training set
     print("\nInput: ", data["train"]["text"][0])
     print("\nOutput: ", data["train"]["label"][0])
 
-    # Access token for the Hugging Face model
-    access_token = ""
-
-    # Load the model and tokenizer (for sequence classification)
-    model = AutoModelForSequenceClassification.from_pretrained('meta-llama/Llama-3.2-1B', token=access_token)
     tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-3.2-1B', token=access_token)
 
-    #### THIS TOKENIZER-SETTING CODE IS PROBABLY NOT CORRECT.
-    # I'm not sure how to set the token, which is necessary to separate the batches in an LLM context window,
-    # so until it is fixed we have to use a batch size of 1.
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
+    print(f"Padding token: {tokenizer.pad_token}")
+    print(f"Padding token id: {tokenizer.pad_token_id}")
+    #tokenizer.model_max_length = 512
+    tokenLen = len(tokenizer)
 
-    # Set device (GPU if available, else CPU) and move model to device
+    # Pre-tokenize training and test data
+    print("Tokenizing data...")
+    train_encodings = tokenizer(data["train"]["text"], truncation=True, padding=True, max_length=512)
+    train_dataset = RottenDataset(train_encodings, data["train"]["label"])
+    test_texts = data["test"]["text"]
+    test_labels = data["test"]["label"]
+    test_encodings = tokenizer(test_texts, truncation=True, padding=True, max_length=512)
+
+    model = AutoModelForSequenceClassification.from_pretrained('meta-llama/Llama-3.2-1B', token=access_token)
+    if model.config.pad_token_id is None:
+        model.config.pad_token_id = model.config.eos_token_id
+    model.resize_token_embeddings(tokenLen)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 
-    # Train the model on the training dataset
     print("Training model...")
-    model = train_model(model, tokenizer, data["train"], device, epochs=1, batch_size=1, learning_rate=2e-5)
+    model = train_model(model, train_dataset, device, epochs=1, batch_size=10, learning_rate=2e-5)
 
-    # Run inference on the test dataset using the fine-tuned model
     print("Running inference on test data...")
-    y_actual = data["test"]["label"]
-    y_pred = run_inference(data, model, tokenizer)
+    y_pred = run_inference(test_encodings, model, device)
+    y_actual = test_labels
 
-    # Evaluate performance
     performance = classification_report(
         y_actual, y_pred,
         target_names=["Negative Review", "Positive Review"]
     )
     print(performance)
+
+# export TOKENIZERS_PARALLELISM=true ;  python llama.py
